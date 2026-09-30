@@ -49,3 +49,12 @@ def run():
 
         # 5. Extract the assistant's reply
         assistant_message = response.choices[0].message.content
+
+        #6. Append the assistants's reply to the history
+        messages.append({"role": "assistant","content": assistant_message})
+
+        #7. Show thr user
+        print(f"\nagent > {assistant_message}")
+
+if __name__ == "__main__":
+    run()
