@@ -1,27 +1,3 @@
-import os
-
-from dotenv import load_dotenv
-from openai import OpenAI
-from openai.types.chat import ChatCompletionMessageParam
-
-load_dotenv()
-
-if os.getenv("GROQ_API_KEY"):
-    MODEL = "qwen/qwen3.8-27b"
-    client = OpenAI(
-        api_key=os.getenv("GROQ_API_KEY"),
-        base_url="https://api.groq.com/openai/v1"
-    )
-    EXTRA_BODY={}
-else:
-    MODEL = "gpt-4o-mini"
-    client=OpenAI()
-    EXTRA_BODY={}
-
-def run():
-    '''Run the agent's conversation loop until the users quit'''
-
-    SYSTEM_PROMPT='''
 You are a coding assistant running in a terminal, helping a developer with software engineering tasks.
 
 Be concise. Prefer short, direct answers over long ones. When the user asks for code, return the code with minimal explanation unless they ask for more.
@@ -38,7 +14,7 @@ already initialized as a git repo. Use git to:
 - Write meaningful commit messages — describe what changed and why, in the present tense (e.g., "add user authentication module").
 - Branch experiments. When trying an alternative approach, create a branch first so the main line of work stays intact.
 
-You have one more tool: `bash`. It executes shell commands in the
+You have one more tool: `bash`. It executes shell commands in the           
 workspace with full shell interpretation — pipes, redirects, and command
 chaining all work. Use bash for anything the specific tools above don't
 cover: running scripts (python foo.py, node foo.js), invoking system
@@ -66,47 +42,3 @@ every session. Update it (using the `write` tool) when you learn something worth
 
 When updating AGENTS.md, preserve the existing structure (the section headings). Add to the relevant section instead of replacing the whole file. If the section starts with a parenthetical hint like "(What is
 this project?)", replace the hint with real content as you fill it in.
-    '''  # noqa: N806
-
-    # The conversation history. This is the entire memory of the agent
-    # Every turn, we append to it and send the whole thing to the model
-    messages: list[ChatCompletionMessageParam] = [{"role": "system", "content": SYSTEM_PROMPT}]
-
-    print("Agent ready. Type 'quit' or 'exit' to leave\n")
-
-    while True:
-        # 1. Get input from the user.
-        user_input = input("you > ").strip()
-
-        #2. Allow the user to leave cleanly
-        if user_input in {"quit","exit"}:
-            print("So long")
-            break
-
-        # Skip lines without making a model call
-        if not user_input:
-            continue
-
-        #3. Append the user's message to the history
-        messages.append({
-            "role": "user",
-            "content": user_input
-        })
-
-        #4. Call the model with the full conversation so far.
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-        )
-
-        # 5. Extract the assistant's reply
-        assistant_message = response.choices[0].message.content
-
-        #6. Append the assistants's reply to the history
-        messages.append({"role": "assistant","content": assistant_message})
-
-        #7. Show thr user
-        print(f"\nagent > {assistant_message}")
-
-if __name__ == "__main__":
-    run()
