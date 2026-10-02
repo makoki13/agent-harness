@@ -1,6 +1,69 @@
-# Re-export the registry for convenient `from harness.tools import registry`.
+"""
+__init__.py — Inicializador del paquete ``harness.tools``.
+
+Este fichero convierte el directorio ``harness/tools/`` en un paquete Python
+importable y cumple dos funciones esenciales al ser importado:
+
+  1. **Re-exportar el registro global de herramientas** para que el agente
+     pueda acceder a él con un import corto y claro.
+
+  2. **Importar cada módulo de herramientas por sus efectos secundarios.**
+     Cada módulo (filesystem, git, bash…) define funciones decoradas con
+     ``@tool``. El decorador registra automáticamente la función en el
+     registro global en el momento del import. Por tanto, basta con importar
+     el módulo para que sus herramientas queden disponibles; no es necesario
+     llamar a ninguna función de registro manualmente.
+
+Re-exportación con alias:
+    El módulo ``registry.py`` contiene una instancia llamada ``registry``.
+    Si en ``agent.py`` hiciéramos ``from harness.tools import registry``,
+    el type checker (Pyright) resolvería ``registry`` como el *módulo*
+    ``harness.tools.registry`` en lugar de la *instancia* ``ToolRegistry()``,
+    porque ambos comparten el mismo nombre. Para evitar esa ambigüedad,
+    re-exportamos la instancia con el alias ``tool_registry``. Así el
+    import en ``agent.py`` es inequívoco::
+
+        from harness.tools import tool_registry   # → instancia ToolRegistry()
+
+    Alternativamente, se puede importar la instancia directamente desde el
+    módulo sin pasar por este ``__init__.py``::
+
+        from harness.tools.registry import registry   # también funciona
+
+Cómo añadir una nueva categoría de herramientas:
+    1. Crear un nuevo módulo en ``harness/tools/``, por ejemplo ``git.py``.
+    2. Definir las funciones decorándolas con ``@tool``.
+    3. Añadir el import correspondiente en este fichero (ver más abajo).
+    No hay que modificar ``registry.py`` ni ``agent.py``: el decorador y
+    el registro global se encargan del resto.
+"""
+
+# ---------------------------------------------------------------------------
+# Re-exportación del registro global
+# ---------------------------------------------------------------------------
+# Importamos la instancia global `registry` (objeto ToolRegistry) desde el
+# módulo registry.py y la exponemos bajo el alias `tool_registry`.
+#
+# El alias evita la colisión de nombres entre el módulo (harness.tools.registry)
+# y la instancia (registry), que confundiría a Pyright y a otros type checkers.
+#
+# Uso desde fuera del paquete:
+#     from harness.tools import tool_registry
+#     tool_registry.get_schemas()
+#     tool_registry.dispatch("read", {"path": "main.py"})
 from harness.tools.registry import registry as tool_registry
 
-# Import each tool module for its side effects (the @tool decorators run on import).
-# Add a new tool category? Add its import here.
-from harness.tools import filesystem  # noqa: F401 — imported for side effects
+# ---------------------------------------------------------------------------
+# Importación de módulos de herramientas por efectos secundarios
+# ---------------------------------------------------------------------------
+# Cada import de esta sección ejecuta el módulo correspondiente. Durante esa
+# ejecución, los decoradores @tool de cada función se disparan y registran
+# la herramienta en la instancia global `registry`. No se usa ningún nombre
+# de estos módulos directamente en este fichero, por eso el marcador noqa.
+#
+# Para añadir una nueva categoría de herramientas, basta con añadir una
+# línea de import aquí. Por ejemplo, para herramientas de git:
+#
+#     from harness.tools import git  # noqa: F401
+#
+from harness.tools import filesystem  # noqa: F401 — importado por efectos secundarios
