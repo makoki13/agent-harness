@@ -43,6 +43,7 @@ from harness.tools.registry import registry
 # al ejecutarse el import. No usamos ningún nombre de este módulo directamente,
 # por eso el noqa.
 from harness.tools import filesystem  # noqa: F401
+from harness.tools import git         # noqa: F401
 
 # Carga las variables definidas en el fichero .env (si existe) en os.environ.
 # Esto permite configurar claves API y URLs sin modificar el código fuente.
@@ -101,6 +102,13 @@ Sé conciso. Prefiere respuestas cortas y directas frente a respuestas largas. C
 Cuando devuelvas código, usa bloques de código delimitados con triple backtick e indica el lenguaje.
 
 Tienes acceso a cinco herramientas de sistema de ficheros — read, write, list, mkdir, delete — que operan sobre un directorio de trabajo. Úsalas siempre que una tarea implique leer, modificar u organizar ficheros. Las rutas son relativas a la raíz del espacio de trabajo. Prefiere leer y escribir ficheros reales antes que describirlos en la conversación.
+
+You also have six git tools — git_status, git_diff, git_log, git_commit, git_checkout, git_branch — for versioning your work. The workspace is
+already initialized as a git repo. Use git to:
+- Commit frequently. Small, focused commits are easier to roll back.
+- Commit before doing anything risky (large rewrites, deleting files, restructuring). A commit before the risky step gives you a recovery point.
+- Write meaningful commit messages — describe what changed and why, in the present tense (e.g., "add user authentication module").
+- Branch experiments. When trying an alternative approach, create a branch first so the main line of work stays intact.
 """
 
 

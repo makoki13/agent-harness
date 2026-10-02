@@ -67,3 +67,5 @@ from harness.tools.registry import registry as tool_registry
 #     from harness.tools import git  # noqa: F401
 #
 from harness.tools import filesystem  # noqa: F401 — importado por efectos secundarios
+
+from harness.tools import git
