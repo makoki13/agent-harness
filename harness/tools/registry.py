@@ -44,12 +44,16 @@ Uso:
         return f"resultado: {param}"
 """
 
-import inspect                          # Introspección de funciones (docstrings, firmas).
-from collections.abc import Callable    # Tipo genérico para funciones invocables.
-from dataclasses import dataclass       # Generación de clases de datos con boilerplate mínimo.
-from typing import Any                  # Tipo comodín para argumentos de despacho dinámico.
+import inspect  # Introspección de funciones (docstrings, firmas).
+from collections.abc import Callable  # Tipo genérico para funciones invocables.
+from dataclasses import (
+    dataclass,  # Generación de clases de datos con boilerplate mínimo.
+)
+from typing import Any  # Tipo comodín para argumentos de despacho dinámico.
 
-from pydantic import TypeAdapter        # Generación de esquemas JSON a partir de tipos Python.
+from pydantic import (
+    TypeAdapter,  # Generación de esquemas JSON a partir de tipos Python.
+)
 
 
 @dataclass
