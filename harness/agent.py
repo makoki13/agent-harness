@@ -1,62 +1,51 @@
-"""
-agent.py — Punto de entrada del agente conversacional con herramientas.
+# ============================================================
+# IMPORTACIÓN DE MÓDULOS
+# ============================================================
 
-Este módulo implementa el bucle principal de interacción entre el usuario
-y un modelo de lenguaje. El agente:
+# json: se usa para deserializar los argumentos que el modelo envía
+# en las llamadas a herramientas (vienen como cadena JSON).
+import json
 
-  1. Recibe instrucciones del usuario desde la terminal.
-  2. Envía la conversación completa (historial + mensaje nuevo) al modelo,
-     junto con los esquemas de las herramientas disponibles.
-  3. Si el modelo solicita ejecutar una o varias herramientas, se despachan,
-     se añaden los resultados al historial y se vuelve a llamar al modelo
-     para obtener la respuesta final en texto.
-  4. Muestra la respuesta al usuario y repite.
+# os: permite leer variables de entorno del sistema operativo.
+import os
 
-El historial de mensajes (`messages`) actúa como la única memoria del agente:
-se envía completo en cada petición al modelo. No hay memoria externa ni
-persistencia entre sesiones (salvo lo que el modelo escriba en AGENTS.md
-mediante las herramientas de filesystem).
+# load_dotenv: carga variables de entorno desde un archivo .env
+# situado en el directorio del proyecto. Esto evita tener que exportar
+# las claves API manualmente o escribirlas en el código fuente.
+from dotenv import load_dotenv
 
-Uso:
-    python agent.py
+# Cliente de la API de OpenAI (compatible también con proveedores
+# que implementen la misma interfaz, como Groq).
+from openai import OpenAI
 
-Dependencias:
-    - openai        → SDK para hablar con APIs compatibles con OpenAI.
-    - python-dotenv → Carga variables de entorno desde un fichero .env.
-    - harness.tools → Paquete interno que contiene el registro de herramientas
-                      y las implementaciones concretas (filesystem, git, bash…).
-"""
+# agents_md: módulo que gestiona el archivo AGENTS.md, la memoria
+# persistente del agente entre sesiones. Se carga al inicio de cada
+# conversación y se actualiza cuando el agente aprende algo relevante.
+from harness.memory import agents_md
 
-import json  # noqa: I001  # Necesario para deserializar los argumentos de las llamadas a herramientas.
-import os                   # Lectura de variables de entorno para la configuración del backend.
-
-from dotenv import load_dotenv  # Carga el fichero .env en las variables de entorno del proceso.
-from openai import OpenAI       # Cliente HTTP para la API de chat completions.
-
-# Importamos la instancia global del registro de herramientas directamente
-# desde su módulo para evitar la ambigüedad de nombres entre el módulo
-# `harness.tools.registry` y la variable `registry` que contiene.
+# registry: registro central de herramientas. Las funciones decoradas
+# con @tool en otros módulos se registran aquí automáticamente.
+# Proporciona métodos para obtener los esquemas JSON (para enviarlos
+# al modelo) y para despachar (ejecutar) una herramienta por nombre.
 from harness.tools.registry import registry
 
-# Importamos el módulo de herramientas de filesystem por sus efectos secundarios:
-# cada función decorada con @tool se registra automáticamente en `registry`
-# al ejecutarse el import. No usamos ningún nombre de este módulo directamente,
-# por eso el noqa.
-from harness.tools import filesystem  # noqa: F401
-from harness.tools import git         # noqa: F401
-
-# Carga las variables definidas en el fichero .env (si existe) en os.environ.
-# Esto permite configurar claves API y URLs sin modificar el código fuente.
+# ============================================================
+# CARGA DE VARIABLES DE ENTORNO
+# ============================================================
+# Busca un archivo .env en el directorio actual y carga las variables
+# definidas en él (por ejemplo, GROQ_API_KEY u OPENAI_API_KEY) como
+# variables de entorno del proceso actual.
 load_dotenv()
 
-# ---------------------------------------------------------------------------
-# Selección del backend de inferencia
-# ---------------------------------------------------------------------------
-# La elección se hace en tiempo de configuración: si existe la variable de
-# entorno GROQ_API_KEY, se usa Groq; en caso contrario, se asume OpenAI.
-# Para cambiar de proveedor basta con editar el fichero .env, sin tocar código.
+# ============================================================
+# CONFIGURACIÓN DEL BACKEND (PROVEEDOR DE INFERENCIA)
+# ============================================================
+# Se decide qué backend utilizar en función de qué clave API está
+# definida en el archivo .env. Es una decisión en tiempo de configuración:
+# para cambiar de proveedor, se modifica el .env, no el código.
 
 if os.getenv("GROQ_API_KEY"):
+    # --- PROVEEDOR: GROQ ---
     # Modelo a utilizar en Groq.
     # Formato: "proveedor/nombre-modelo", tal como lo espera la API de Groq.
     MODEL = "qwen/qwen3.8-27b"
@@ -76,6 +65,7 @@ if os.getenv("GROQ_API_KEY"):
     EXTRA_BODY = {}
 
 else:
+    # --- PROVEEDOR: OPENAI (por defecto) ---
     # Modelo por defecto si usamos la API de OpenAI directamente.
     MODEL = "gpt-4o-mini"
 
@@ -87,185 +77,197 @@ else:
     # Sin parámetros extra para OpenAI.
     EXTRA_BODY = {}
 
-# ---------------------------------------------------------------------------
-# Prompt de sistema
-# ---------------------------------------------------------------------------
-# Define la personalidad, el tono y las capacidades del agente. Se envía
-# como primer mensaje del historial en cada petición para que el modelo
-# mantenga el contexto de su rol durante toda la conversación.
+
+# ============================================================
+# PROMPT DE SISTEMA
+# ============================================================
+# Define el comportamiento, las capacidades y las reglas que el modelo
+# debe seguir durante toda la conversación. Se envía como primer mensaje
+# en cada petición al modelo para que siempre tenga presente su rol.
 
 SYSTEM_PROMPT = """
 Eres un asistente de programación que se ejecuta en una terminal, ayudando a un desarrollador con tareas de ingeniería de software.
 
-Sé conciso. Prefiere respuestas cortas y directas frente a respuestas largas. Cuando el usuario pida código, devuelve el código con una explicación mínima salvo que pidan más detalle.
+Sé conciso. Prefiere respuestas cortas y directas frente a respuestas largas. Cuando el usuario pida código, devuelve el código con una explicación mínima, a menos que pidan más detalles.
 
-Cuando devuelvas código, usa bloques de código delimitados con triple backtick e indica el lenguaje.
+Cuando devuelvas código, usa bloques de código delimitados (fenced code blocks) y especifica el lenguaje.
 
-Tienes acceso a cinco herramientas de sistema de ficheros — read, write, list, mkdir, delete — que operan sobre un directorio de trabajo. Úsalas siempre que una tarea implique leer, modificar u organizar ficheros. Las rutas son relativas a la raíz del espacio de trabajo. Prefiere leer y escribir ficheros reales antes que describirlos en la conversación.
+Tienes acceso a cinco herramientas de sistema de archivos — read, write, list, mkdir, delete — que operan sobre un directorio de trabajo. Úsalas siempre que una tarea implique leer, modificar u organizar archivos. Las rutas son relativas a la raíz del directorio de trabajo. Prefiere leer y escribir archivos reales en lugar de describirlos en la conversación.
 
-You also have six git tools — git_status, git_diff, git_log, git_commit, git_checkout, git_branch — for versioning your work. The workspace is
-already initialized as a git repo. Use git to:
-- Commit frequently. Small, focused commits are easier to roll back.
-- Commit before doing anything risky (large rewrites, deleting files, restructuring). A commit before the risky step gives you a recovery point.
-- Write meaningful commit messages — describe what changed and why, in the present tense (e.g., "add user authentication module").
-- Branch experiments. When trying an alternative approach, create a branch first so the main line of work stays intact.
+También dispones de seis herramientas de git — git_status, git_diff, git_log, git_commit, git_checkout, git_branch — para versionar tu trabajo. El directorio de trabajo ya está inicializado como un repositorio git. Usa git para:
+- Hacer commits con frecuencia. Los commits pequeños y enfocados son más fáciles de revertir.
+- Hacer commit antes de realizar cualquier acción arriesgada (reescrituras grandes, eliminación de archivos, reestructuraciones). Un commit antes del paso arriesgado te proporciona un punto de recuperación.
+- Escribir mensajes de commit significativos: describe qué cambió y por qué, en tiempo presente (por ejemplo, "añadir módulo de autenticación de usuario").
+- Ramificar experimentos. Cuando pruebes un enfoque alternativo, crea primero una rama para que la línea principal de trabajo permanezca intacta.
+
+El directorio de trabajo contiene un archivo `AGENTS.md` — tu memoria persistente entre sesiones. Se carga automáticamente en tu contexto al inicio de cada sesión. Actualízalo (usando la herramienta `write`) cuando aprendas algo que merezca ser recordado para futuras sesiones. Cosas útiles que escribir:
+- Contexto del proyecto: qué es este código, qué hace, quién lo usa
+- Convenciones que has observado: estilo de código, bibliotecas, patrones de nomenclatura
+- Decisiones que se han tomado y el razonamiento detrás de ellas
+- Trampas: peculiaridades, dependencias no obvias, cosas que han causado problemas en sesiones anteriores
+- Tareas activas: en qué se está trabajando actualmente (elimínalas cuando se completen)
+
+Cuando actualices AGENTS.md, preserva la estructura existente (los encabezados de sección). Añade contenido a la sección relevante en lugar de reemplazar todo el archivo. Si la sección comienza con una pista entre paréntesis como "(¿Qué es este proyecto?)", reemplaza la pista con contenido real a medida que lo vayas completando.
 """
 
 
+# ============================================================
+# FUNCIÓN PRINCIPAL: BUCLE DE CONVERSACIÓN DEL AGENTE
+# ============================================================
+
 def run() -> None:
-    """
-    Bucle principal del agente.
+    """Ejecuta el bucle de conversación del agente hasta que el usuario decida salir."""
 
-    Mantiene una conversación interactiva con el usuario hasta que este
-    escribe 'quit' o 'exit'. En cada turno:
+    # ----------------------------------------------------------
+    # CARGA DE LA MEMORIA PERSISTENTE Y CONSTRUCCIÓN DEL HISTORIAL
+    # ----------------------------------------------------------
+    # Se carga el archivo AGENTS.md (memoria acumulada del proyecto)
+    # y se ensambla la lista inicial de mensajes.
+    # El primer mensaje de sistema es el prompt del harness (comportamiento);
+    # el segundo es la memoria acumulada del proyecto (contexto persistente).
 
-      1. Lee la entrada del usuario.
-      2. La añade al historial de mensajes.
-      3. Envía el historial completo + herramientas al modelo.
-      4. Si el modelo responde con llamadas a herramientas, las ejecuta,
-         añade los resultados al historial y vuelve a consultar al modelo.
-      5. Muestra la respuesta textual final al usuario.
+    # Historial de la conversación. Esta es la memoria completa del agente.
+    # En cada turno, añadimos mensajes nuevos y enviamos el historial
+    # completo al modelo para que mantenga el contexto de la conversación.
+    messages = [
+        # Primer mensaje de sistema: define el rol y las reglas del agente.
+        {"role": "system", "content": SYSTEM_PROMPT},
+        # Segundo mensaje de sistema: inyecta la memoria persistente del proyecto
+        # (contenido de AGENTS.md) para que el agente tenga contexto acumulado.
+        {"role": "system", "content": agents_md.load_agents_md()},
+    ]
 
-    El historial (`messages`) crece de forma ilimitada durante la sesión.
-    Es la única memoria del agente: no hay resumen ni ventana deslizante.
-    """
-
-    # Historial de la conversación. Es la memoria completa del agente.
-    # Cada turno añadimos mensajes y enviamos la lista entera al modelo.
-    # El primer mensaje es siempre el prompt de sistema, que establece
-    # el rol y las instrucciones permanentes del asistente.
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-
+    # Mensaje de bienvenida que indica al usuario que el agente está operativo.
     print("Agente listo. Escribe 'quit' o 'exit' para salir.\n")
 
+    # ----------------------------------------------------------
+    # BUCLE PRINCIPAL DE CONVERSACIÓN
+    # ----------------------------------------------------------
+    # Se repite indefinidamente hasta que el usuario escriba "quit" o "exit".
     while True:
 
-        # ------------------------------------------------------------------
-        # Paso 1: Leer la entrada del usuario desde la terminal.
-        # ------------------------------------------------------------------
-        # Se usa .strip() para eliminar espacios en blanco y saltos de línea
-        # sobrantes que el usuario pudiera introducir accidentalmente.
+        # 1. Obtener la entrada del usuario desde la terminal.
+        #    .strip() elimina espacios en blanco al inicio y al final.
         user_input = input("tú > ").strip()
 
-        # ------------------------------------------------------------------
-        # Paso 2: Comprobar si el usuario quiere salir del bucle.
-        # ------------------------------------------------------------------
-        # Se aceptan ambas palabras clave para mayor comodidad.
+        # 2. Permitir al usuario salir limpiamente del bucle.
+        #    Si escribe "quit" o "exit", se rompe el bucle y termina el programa.
         if user_input in {"quit", "exit"}:
-            print("Hasta luego.")
+            print("¡Hasta luego!")
             break
 
-        # Si el usuario pulsa Enter sin escribir nada, saltamos la iteración
-        # sin hacer una llamada al modelo (evita peticiones vacías innecesarias).
+        # Si el usuario pulsa Enter sin escribir nada, saltamos esta iteración
+        # sin realizar ninguna llamada al modelo (evita peticiones innecesarias).
         if not user_input:
             continue
 
-        # ------------------------------------------------------------------
-        # Paso 3: Añadir el mensaje del usuario al historial.
-        # ------------------------------------------------------------------
-        # El rol "user" indica al modelo que este mensaje proviene del
-        # usuario humano (a diferencia de "system" o "assistant").
+        # 3. Añadir el mensaje del usuario al historial de conversación.
+        #    El rol "user" indica que este mensaje proviene del usuario.
         messages.append({
             "role": "user",
             "content": user_input,
         })
 
-        # ------------------------------------------------------------------
-        # Paso 4: Primera llamada al modelo.
-        # ------------------------------------------------------------------
-        # Enviamos el historial completo de la conversación junto con los
-        # esquemas JSON de todas las herramientas registradas. El modelo
-        # puede responder de dos formas:
-        #   a) Texto directo (message.tool_calls es None) → vamos al paso 7.
-        #   b) Una o más llamadas a herramientas → entramos en el bloque
-        #      de despacho de herramientas (pasos 5-6).
+        # ----------------------------------------------------------
+        # 4. PRIMERA LLAMADA AL MODELO
+        # ----------------------------------------------------------
+        # Se envía al modelo:
+        #   - El historial completo de la conversación (messages)
+        #   - Parámetros extra del proveedor (extra_body)
+        #   - Los esquemas JSON de todas las herramientas disponibles
+        #     (tools), para que el modelo sepa qué puede invocar.
+        #
+        # El modelo puede responder de dos formas:
+        #   a) Con texto directo (sin tool_calls) → respuesta final.
+        #   b) Con una o más llamadas a herramientas (tool_calls) →
+        #      el agente debe ejecutarlas y volver a llamar al modelo.
         response = client.chat.completions.create(
             model=MODEL,
-            messages=messages,  # pyright: ignore[reportArgumentType]
+            messages=messages,           # pyright: ignore[reportArgumentType]
             extra_body=EXTRA_BODY,
-            tools=registry.get_schemas(),  # pyright: ignore[reportArgumentType]
+            tools=registry.get_schemas() # pyright: ignore[reportArgumentType]
         )
 
-        # Extraemos el mensaje del modelo de la respuesta.
-        # `message` puede contener texto (message.content), llamadas a
-        # herramientas (message.tool_calls), o ambos.
+        # Extraer el mensaje del asistente de la respuesta.
         message = response.choices[0].message
 
-        # ------------------------------------------------------------------
-        # Paso 5: Despacho de herramientas (si el modelo las solicitó).
-        # ------------------------------------------------------------------
-        # Si el modelo decidió que necesita ejecutar herramientas para
-        # responder, `message.tool_calls` contiene una lista de objetos
-        # con el nombre de la función y sus argumentos serializados en JSON.
+        # ----------------------------------------------------------
+        # 5. GESTIÓN DE LLAMADAS A HERRAMIENTAS (TOOL CALLING)
+        # ----------------------------------------------------------
+        # Si el modelo solicitó ejecutar una o más herramientas,
+        # se procesan antes de generar la respuesta final al usuario.
+        # Implementación mínima viable: una sola ronda de herramientas
+        # (el modelo no puede encadenar múltiples rondas en un mismo turno).
         if message.tool_calls:
 
-            # Paso 5a: Registrar el mensaje del modelo (que contiene las
-            # llamadas a herramientas) en el historial. Esto es necesario
-            # porque los mensajes de resultado de herramienta (role="tool")
-            # deben referenciar un tool_call_id que exista en el historial.
+            # Paso 1: Registrar el mensaje del modelo con las llamadas a
+            # herramientas en el historial. Esto es necesario para que los
+            # mensajes de resultado de herramientas que añadiremos a
+            # continuación tengan un mensaje al que hacer referencia
+            # (mediante tool_call_id).
             messages.append(message)  # pyright: ignore[reportArgumentType]
 
-            # Paso 5b: Ejecutar cada herramienta solicitada y añadir su
-            # resultado al historial. El campo tool_call_id vincula el
-            # resultado con la llamada original para que el modelo pueda
-            # emparejarlos correctamente.
+            # Paso 2: Ejecutar cada herramienta solicitada y añadir su
+            # resultado al historial. Se usa el tool_call_id correspondiente
+            # para que el modelo pueda emparejar cada resultado con su solicitud.
             for call in message.tool_calls:
-                # Los argumentos vienen como un string JSON (p. ej. '{"path": "src/main.py"}').
-                # Los deserializamos a un dict para pasarlos como kwargs a la función.
+                # Deserializar los argumentos JSON que el modelo envió.
+                # call.function.arguments es una cadena JSON, por ejemplo:
+                # '{"path": "src/main.py", "content": "print(42)"}'
                 arguments = json.loads(call.function.arguments)  # pyright: ignore[reportAttributeAccessIssue]
 
-                # Despachamos la llamada al registro de herramientas.
-                # `registry.dispatch` busca la función por nombre, la ejecuta
-                # con los argumentos dados y devuelve el resultado como string.
-                # Si la herramienta lanza una excepción, dispatch la captura
-                # y devuelve un mensaje de error legible por el modelo.
+                # Despachar (ejecutar) la herramienta por nombre, pasándole
+                # los argumentos deserializados. registry.dispatch busca la
+                # función registrada con ese nombre y la invoca.
                 result = registry.dispatch(call.function.name, arguments)  # pyright: ignore[reportAttributeAccessIssue]
 
-                # Añadimos el resultado como un mensaje de rol "tool".
-                # El modelo usa tool_call_id para saber a qué llamada
-                # corresponde este resultado.
+                # Añadir el resultado de la herramienta al historial.
+                # El rol "tool" indica que este mensaje es el resultado
+                # de una ejecución de herramienta. El tool_call_id vincula
+                # este resultado con la solicitud original del modelo.
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call.id,
                     "content": result,
                 })
 
-            # Paso 6: Segunda llamada al modelo con los resultados.
-            # ------------------------------------------------------------------
-            # Ahora que el historial contiene las respuestas de las
-            # herramientas, volvemos a consultar al modelo para que genere
-            # la respuesta textual final dirigida al usuario. El modelo
-            # puede decidir que necesita más herramientas (en cuyo caso
-            # habría que repetir el ciclo), pero en esta implementación
-            # mínima solo se hace una ronda de despacho por turno.
+            # Paso 3: Volver a llamar al modelo, ahora con los resultados
+            # de las herramientas en el contexto. Esta segunda llamada
+            # produce la respuesta textual final del modelo para este turno,
+            # basada en la información obtenida de las herramientas.
             response = client.chat.completions.create(
                 model=MODEL,
-                messages=messages,  # pyright: ignore[reportArgumentType]
-                tools=registry.get_schemas(),  # pyright: ignore[reportArgumentType]
+                messages=messages,           # pyright: ignore[reportArgumentType]
+                tools=registry.get_schemas() # pyright: ignore[reportArgumentType]
             )
+            # Extraer el mensaje final del asistente de la segunda respuesta.
             message = response.choices[0].message
 
-        # ------------------------------------------------------------------
-        # Paso 7: Extraer y mostrar la respuesta final al usuario.
-        # ------------------------------------------------------------------
-        # Llegados aquí, `message` contiene la respuesta textual definitiva
-        # del modelo para este turno, ya sea:
-        #   - Directa (el modelo no necesitó herramientas), o
-        #   - Tras el despacho de herramientas (segunda llamada).
-        assistant_text = message.content
+        # ----------------------------------------------------------
+        # 6. EXTRAER Y REGISTRAR LA RESPUESTA FINAL
+        # ----------------------------------------------------------
+        # En este punto, `message` es la respuesta textual final del modelo
+        # para este turno. Puede provenir de:
+        #   - La primera llamada (si no se necesitaron herramientas), o
+        #   - La segunda llamada (tras ejecutar las herramientas).
+        #
+        # Si el modelo usó herramientas pero no generó texto adicional,
+        # se usa un mensaje de marcador para informar al usuario.
+        assistant_text = message.content or "(sin respuesta textual: solo se usaron herramientas)"
 
-        # Registramos la respuesta del asistente en el historial para que
-        # esté disponible como contexto en turnos futuros.
-        messages.append({"role": "assistant", "content": assistant_text})  # pyright: ignore[reportArgumentType]
+        # Añadir la respuesta del asistente al historial para que esté
+        # disponible como contexto en futuros turnos de la conversación.
+        messages.append({"role": "assistant", "content": assistant_text})
 
-        # Mostramos la respuesta en la terminal con un prefijo identificativo.
+        # 7. Mostrar la respuesta del agente al usuario en la terminal.
         print(f"\nagente > {assistant_text}\n")
 
 
-# ---------------------------------------------------------------------------
-# Punto de entrada del script.
-# ---------------------------------------------------------------------------
-# Permite ejecutar el agente directamente con `python agent.py` sin que
-# el bucle se inicie si el módulo se importa desde otro lugar.
+# ============================================================
+# PUNTO DE ENTRADA DEL PROGRAMA
+# ============================================================
+# Este bloque garantiza que la función run() solo se ejecute cuando
+# el script se ejecuta directamente (python script.py), y no cuando
+# se importa como módulo desde otro archivo.
 if __name__ == "__main__":
     run()

@@ -1,0 +1,50 @@
+"""
+Subpaquete de memoria. Re-exporta la API pública de memoria para que el
+resto del harness pueda importar sin necesidad de conocer la estructura
+interna de módulos de este subpaquete.
+
+Los futuros módulos de memoria (recuperación, búsqueda, etc.) se añadirán
+a este archivo como re-exportaciones también.
+
+Este archivo es el __init__.py del paquete ``harness.memory``.
+Su función principal es actuar como una fachada (facade): define la
+interfaz pública del subpaquete y oculta la organización interna de
+módulos. El resto del código del harness solo necesita saber:
+
+    from harness.memory import load_agents_md
+
+sin preocuparse de que la implementación viva en
+``harness/memory/agents_md.py``.
+"""
+
+# ============================================================
+# RE-EXPORTACIÓN DE LA API PÚBLICA
+# ============================================================
+# Se importa load_agents_md desde el módulo interno agents_md y se
+# re-exporta al espacio de nombres del paquete. Esto permite que
+# cualquier módulo del harness haga:
+#
+#     from harness.memory import load_agents_md
+#
+# en lugar de:
+#
+#     from harness.memory.agents_md import load_agents_md
+#
+# Ventajas de este patrón:
+#   1. Encapsulación: si en el futuro la implementación se mueve a otro
+#      módulo (p. ej. harness/memory/persistent.py), solo hay que cambiar
+#      esta línea. El resto del código no se toca.
+#   2. Punto único de importación: el consumidor no necesita saber cuántos
+#      archivos hay dentro de harness/memory/ ni cómo se llaman.
+#   3. Extensibilidad: cuando se añadan nuevos módulos de memoria
+#      (recuperación vectorial, búsqueda semántica, etc.), se re-exportarán
+#      aquí y el resto del harness los usará con el mismo patrón de import.
+#
+# noqa: F401
+#   Esta directiva le dice a los linters (flake8, ruff, etc.) que ignoren
+#   la advertencia F401 ("imported but unused"). El linter detecta que
+#   load_agents_md se importa pero no se usa directamente en ESTE archivo.
+#   Sin embargo, el propósito de la importación no es usarla aquí, sino
+#   re-exportarla para que esté disponible en el espacio de nombres del
+#   paquete. Sin el noqa, el linter marcaría una falsa alarma.
+from harness.memory.agents_md import load_agents_md  # noqa: F401

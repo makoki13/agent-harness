@@ -44,17 +44,47 @@ Uso:
         return f"resultado: {param}"
 """
 
-import inspect  # Introspección de funciones (docstrings, firmas).
-from collections.abc import Callable  # Tipo genérico para funciones invocables.
-from dataclasses import (
-    dataclass,  # Generación de clases de datos con boilerplate mínimo.
-)
-from typing import Any  # Tipo comodín para argumentos de despacho dinámico.
+# ============================================================
+# IMPORTACIONES
+# ============================================================
 
-from pydantic import (
-    TypeAdapter,  # Generación de esquemas JSON a partir de tipos Python.
-)
+# inspect: módulo estándar para introspección de objetos Python.
+# Aquí se usa para extraer el docstring de una función de forma limpia
+# (inspect.getdoc() elimina la indentación heredada del código fuente,
+# a diferencia de acceder directamente a func.__doc__).
+import inspect
 
+# Callable: tipo genérico del módulo collections.abc que representa
+# cualquier objeto invocable (funciones, métodos, lambdas, clases, etc.).
+# Se usa en las anotaciones de tipo para indicar "esto es una función".
+from collections.abc import Callable
+
+# dataclass: decorador del módulo estándar que genera automáticamente
+# los métodos especiales (__init__, __repr__, __eq__, etc.) de una clase
+# a partir de las anotaciones de tipo de sus atributos. Elimina el
+# boilerplate de escribir constructores manualmente.
+from dataclasses import dataclass
+
+# Any: tipo comodín de typing que acepta cualquier valor. Se usa en el
+# diccionario de argumentos del despacho porque los argumentos varían
+# según la herramienta (pueden ser str, int, bool, etc.).
+from typing import Any
+
+# TypeAdapter: clase de Pydantic v2 que permite generar esquemas JSON
+# a partir de tipos Python arbitrarios (incluidas firmas de funciones).
+# Es la pieza clave que convierte las anotaciones de tipo de una función
+# Python en el formato JSON Schema que espera la API de OpenAI.
+from pydantic import TypeAdapter
+
+# ============================================================
+# DATACLASS: Tool
+# ============================================================
+# Representa una herramienta registrada. Agrupa toda la información
+# necesaria para exponer una función Python como herramienta del agente.
+#
+# Se usa @dataclass para que Python genere automáticamente el constructor
+# (__init__) y otros métodos a partir de los atributos declarados.
+# Esto evita escribir código repetitivo de inicialización.
 
 @dataclass
 class Tool:
@@ -66,7 +96,7 @@ class Tool:
     (descripción), la referencia a la función ejecutable y el esquema JSON
     de sus parámetros.
 
-    Attributes:
+    Atributos:
         name:        Nombre único de la herramienta. Es el identificador que
                      el modelo usa en sus llamadas (``tool_calls[].function.name``).
                      Coincide con el nombre de la función Python decorada.
@@ -79,11 +109,43 @@ class Tool:
                      compatible con OpenAI. Se genera automáticamente a partir
                      de las anotaciones de tipo de la función mediante Pydantic.
     """
+    # Nombre único de la herramienta. Ejemplo: "read", "git_commit", "bash".
+    # El modelo usa este nombre exacto al solicitar una herramienta.
     name: str
+
+    # Descripción legible de la herramienta. Proviene del docstring.
+    # El modelo la lee para decidir cuándo usar la herramienta.
     description: str
+
+    # Referencia directa a la función Python. No es una cadena ni un nombre:
+    # es el objeto función real, invocable con function(**kwargs).
     function: Callable
+
+    # Esquema JSON de los parámetros, generado por Pydantic.
+    # Describe los nombres, tipos y obligatoriedad de cada argumento.
+    # Ejemplo para `def read(path: str) -> str:`:
+    # {
+    #   "type": "object",
+    #   "properties": {"path": {"type": "string"}},
+    #   "required": ["path"]
+    # }
     schema: dict
 
+
+# ============================================================
+# CLASE: ToolRegistry
+# ============================================================
+# Registro central de herramientas. Implementa el patrón de diseño
+# "Registry" (Registro): un punto único de acceso para almacenar y
+# recuperar objetos por nombre.
+#
+# Responsabilidades:
+#   - register():    añadir una herramienta al registro.
+#   - get_schemas(): generar la lista de esquemas para enviar al modelo.
+#   - dispatch():    ejecutar una herramienta por nombre con argumentos.
+#
+# Existe una única instancia global (variable `registry` al final del
+# módulo) que se comparte entre todos los módulos del harness.
 
 class ToolRegistry:
     """
@@ -100,12 +162,17 @@ class ToolRegistry:
         Inicializa el registro con una colección vacía de herramientas.
 
         Se usa un diccionario indexado por nombre para que la búsqueda
-        durante el despacho sea O(1) en lugar de O(n).
+        durante el despacho sea O(1) (acceso directo por hash) en lugar
+        de O(n) (búsqueda lineal en una lista).
         """
-        # Diccionario interno que mapea nombre de herramienta → objeto Tool.
-        # El guion bajo indica que es un atributo privado: el acceso externo
-        # debe hacerse a través de los métodos register(), get_schemas()
-        # y dispatch().
+        # Diccionario interno que mapea:
+        #   clave   → nombre de la herramienta (str)
+        #   valor   → objeto Tool con metadatos + función
+        #
+        # El prefijo "_" indica que es un atributo "privado por convención":
+        # el acceso externo debe hacerse a través de los métodos públicos
+        # register(), get_schemas() y dispatch(). Python no impone
+        # privacidad real, pero es una señal de intención.
         self._tools: dict[str, Tool] = {}
 
     def register(self, tool: Tool) -> None:
@@ -120,8 +187,10 @@ class ToolRegistry:
         Args:
             tool: Objeto Tool con los metadatos y la función a registrar.
         """
-        # Última escritura gana: si el mismo nombre se registra dos veces,
-        # la segunda definición reemplaza silenciosamente a la primera.
+        # Inserción o sobrescritura en el diccionario.
+        # Si el nombre ya existía, la nueva definición reemplaza a la anterior.
+        # No se emite ningún aviso ni excepción: es una decisión de diseño
+        # para facilitar la iteración rápida durante el desarrollo.
         self._tools[tool.name] = tool
 
     def get_schemas(self) -> list[dict]:
@@ -136,7 +205,7 @@ class ToolRegistry:
                 "function": {
                     "name": "...",
                     "description": "...",
-                    "parameters": { ... }  # esquema JSON
+                    "parameters": { ... }  # esquema JSON Schema
                 }
             }
 
@@ -147,22 +216,40 @@ class ToolRegistry:
         Returns:
             Lista de diccionarios, uno por herramienta registrada, en el
             formato que espera ``client.chat.completions.create(tools=...)``.
+
+        Ejemplo de salida con una herramienta "read":
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "read",
+                        "description": "Lee un fichero del workspace.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"}
+                            },
+                            "required": ["path"]
+                        }
+                    }
+                }
+            ]
         """
-        # Envolvemos el esquema de cada herramienta en la envoltura
-        # {"type": "function", "function": {...}} que exige la API de OpenAI.
-        # El campo "parameters" contiene el esquema JSON generado por
-        # Pydantic, que describe los tipos, nombres y obligatoriedad de
-        # cada parámetro de la función.
+        # Comprensión de lista que itera sobre todos los objetos Tool
+        # registrados y los envuelve en la estructura que exige la API
+        # de OpenAI. El campo "parameters" contiene el esquema JSON
+        # generado por Pydantic, que describe los tipos, nombres y
+        # obligatoriedad de cada parámetro de la función.
         return [
             {
-                "type": "function",
+                "type": "function",       # Tipo fijo: siempre "function"
                 "function": {
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.schema,
+                    "name": t.name,              # Identificador de la herramienta
+                    "description": t.description, # Docstring de la función
+                    "parameters": t.schema,       # Esquema JSON Schema
                 },
             }
-            for t in self._tools.values()
+            for t in self._tools.values()  # Iterar sobre todos los Tool registrados
         ]
 
     def dispatch(self, name: str, arguments: dict[str, Any]) -> str:
@@ -194,47 +281,86 @@ class ToolRegistry:
         Returns:
             Resultado de la herramienta como cadena, o un mensaje de error
             si el nombre es desconocido o la función lanza una excepción.
+
+        Ejemplo de uso:
+            resultado = registry.dispatch("read", {"path": "src/main.py"})
+            # resultado → "import os\\nimport sys\\n..."
         """
-        # Rechazar nombres de herramienta desconocidos. Devolvemos un string
-        # de error (en lugar de lanzar una excepción) para que el modelo
-        # pueda leerlo y recuperarse: por ejemplo, corrigiendo el nombre o
-        # informando al usuario de que la herramienta no existe.
+        # Validación previa: rechazar nombres de herramienta desconocidos.
+        # Devolvemos un string de error (en lugar de lanzar una excepción)
+        # para que el modelo pueda leerlo y recuperarse: por ejemplo,
+        # corrigiendo el nombre o informando al usuario de que la
+        # herramienta no existe.
         if name not in self._tools:
             return f"error: herramienta desconocida '{name}'"
 
         # Ejecutar la herramienta dentro de un bloque try/except para que
         # cualquier excepción (FileNotFoundError, PermissionError, ValueError,
-        # etc.) no propague hacia arriba y rompa el bucle del agente.
+        # TypeError, etc.) no propague hacia arriba y rompa el bucle del agente.
         # El modelo recibe el string de error y decide el siguiente paso.
         try:
             # Desempaquetamos el diccionario de argumentos como keyword
-            # arguments de la función. Por ejemplo, si arguments es
-            # {"path": "src/main.py"}, la llamada equivale a
-            # function(path="src/main.py").
+            # arguments de la función usando el operador **.
+            # Por ejemplo, si arguments es {"path": "src/main.py"},
+            # la llamada equivale a: function(path="src/main.py")
             result = self._tools[name].function(**arguments)
 
             # Convertimos el resultado a string para que pueda insertarse
-            # en el mensaje de rol "tool" del historial. Las funciones de
-            # herramientas ya devuelven strings, pero esta conversión es una
-            # red de seguridad por si alguna devuelve otro tipo.
+            # en el mensaje de rol "tool" del historial de conversación.
+            # Las funciones de herramientas ya devuelven strings por diseño,
+            # pero esta conversión es una red de seguridad por si alguna
+            # devuelve otro tipo (int, bool, None, etc.).
             return str(result)
 
         except Exception as e:
-            # Capturamos cualquier excepción y la formateamos como un string
-            # legible que incluye el tipo de excepción y su mensaje.
-            # Ejemplo: "error: FileNotFoundError: [Errno 2] No such file..."
+            # Capturamos CUALQUIER excepción (Exception es la clase base
+            # de todas las excepciones no de sistema) y la formateamos como
+            # un string legible que incluye el tipo de excepción y su mensaje.
+            #
+            # Ejemplo de salida:
+            #   "error: FileNotFoundError: [Errno 2] No such file or directory: 'foo.py'"
+            #   "error: PermissionError: [Errno 13] Permission denied: '/etc/passwd'"
+            #
+            # El modelo lee este string, comprende que algo falló, y puede
+            # decidir reintentar con argumentos corregidos, usar otra
+            # herramienta, o informar al usuario del problema.
             return f"error: {type(e).__name__}: {e}"
 
 
-# ---------------------------------------------------------------------------
-# Instancia global del registro
-# ---------------------------------------------------------------------------
-# Este es el único registro que usa todo el harness. Los módulos de
-# herramientas importan `tool` (el decorador) para registrarse, y el
-# agente importa `registry` para obtener esquemas y despachar llamadas.
-# Se crea en el momento del import de este módulo.
+# ============================================================
+# INSTANCIA GLOBAL DEL REGISTRO
+# ============================================================
+# Este es el único registro que usa todo el harness. Se crea una sola vez,
+# en el momento de importar este módulo, y se comparte entre todos los
+# demás módulos.
+#
+# - Los módulos de herramientas (filesystem.py, git.py, bash.py, etc.)
+#   importan `tool` (el decorador) para registrar sus funciones.
+# - El bucle principal del agente importa `registry` para obtener los
+#   esquemas (get_schemas) y ejecutar herramientas (dispatch).
+#
+# Es un patrón de "singleton por módulo": no se usa una clase Singleton,
+# simplemente se crea una instancia a nivel de módulo y se importa esa.
 registry = ToolRegistry()
 
+
+# ============================================================
+# DECORADOR: @tool
+# ============================================================
+# Este decorador es el mecanismo de registro automático. Cuando un módulo
+# de herramientas se importa, todas las funciones decoradas con @tool se
+# registran inmediatamente en la instancia global `registry`.
+#
+# El decorador NO envuelve la función (no crea un wrapper). Solo extrae
+# metadatos, registra la herramienta y devuelve la función original intacta.
+# Esto significa que la función puede seguir usándose como una función
+# Python normal en tests u otros contextos.
+#
+# El momento de ejecución del decorador es el import del módulo:
+#   import harness.tools.filesystem  →  @tool se ejecuta para cada función
+#   import harness.tools.git         →  @tool se ejecuta para cada función
+#   ...
+# Al final de todos los imports, `registry` contiene todas las herramientas.
 
 def tool(func: Callable) -> Callable:
     """
@@ -264,7 +390,7 @@ def tool(func: Callable) -> Callable:
         registro es un efecto secundario del decorador, no transforma
         la función.
 
-    Example::
+    Ejemplo::
 
         @tool
         def read(path: str) -> str:
@@ -272,35 +398,66 @@ def tool(func: Callable) -> Callable:
             return Path(path).read_text()
 
         # Tras el import, registry contiene una herramienta llamada "read"
-        # con el docstring como descripción y {"path": {"type": "string"}}
-        # como esquema de parámetros.
+        # con el docstring como descripción y el siguiente esquema:
+        # {
+        #   "type": "object",
+        #   "properties": {"path": {"type": "string"}},
+        #   "required": ["path"]
+        # }
     """
+    # ----------------------------------------------------------
     # Paso 1: Extraer metadatos de la función.
-    # El nombre se usa como identificador único en el registro y como el
-    # nombre que el modelo verá en la lista de herramientas disponibles.
+    # ----------------------------------------------------------
+
+    # El nombre de la función se usa como identificador único en el registro
+    # y como el nombre que el modelo verá en la lista de herramientas.
+    # Ejemplo: def read(...) → name = "read"
     name = func.__name__
 
-    # El docstring se usa como descripción para el modelo. `inspect.getdoc()`
-    # es preferible a `func.__doc__` porque limpia la indentación heredada
-    # del código fuente. Si la función no tiene docstring, usamos una
-    # cadena vacía para evitar None.
+    # El docstring se usa como descripción para el modelo.
+    # inspect.getdoc() es preferible a func.__doc__ porque:
+    #   - Limpia la indentación heredada del código fuente.
+    #   - Devuelve None si no hay docstring (en vez de un string vacío).
+    # Usamos `or ""` para convertir None en cadena vacía si no hay docstring.
     description = inspect.getdoc(func) or ""
 
-    # Paso 2: Generar el esquema JSON de los parámetros de la función.
-    # TypeAdapter de Pydantic introspecciona la firma de la función (nombres
-    # de parámetros, anotaciones de tipo, valores por defecto) y produce un
-    # esquema JSON compatible con el formato "parameters" de OpenAI.
-    # Por ejemplo, para `def read(path: str) -> str:` genera algo como:
+    # ----------------------------------------------------------
+    # Paso 2: Generar el esquema JSON de los parámetros.
+    # ----------------------------------------------------------
+    # TypeAdapter de Pydantic introspecciona la firma de la función
+    # (nombres de parámetros, anotaciones de tipo, valores por defecto)
+    # y produce un esquema JSON Schema compatible con OpenAI.
+    #
+    # Ejemplo: para `def read(path: str) -> str:` genera:
     #   {
     #     "type": "object",
-    #     "properties": {"path": {"type": "string"}},
+    #     "properties": {
+    #       "path": {"type": "string"}
+    #     },
     #     "required": ["path"]
     #   }
+    #
+    # Ejemplo: para `def git_log(limit: int = 10) -> str:` genera:
+    #   {
+    #     "type": "object",
+    #     "properties": {
+    #       "limit": {"type": "integer", "default": 10}
+    #     }
+    #   }
+    # (sin "required" porque limit tiene valor por defecto)
+    #
+    # IMPORTANTE: la función DEBE tener anotaciones de tipo en sus
+    # parámetros. Sin ellas, Pydantic no puede generar el esquema.
     schema = TypeAdapter(func).json_schema()
 
-    # Paso 3: Crear el objeto Tool con todos los metadatos y registrarlo
-    # en la instancia global del registro. A partir de este momento, la
-    # herramienta aparece en get_schemas() y puede ser despachada por nombre.
+    # ----------------------------------------------------------
+    # Paso 3: Crear el objeto Tool y registrarlo.
+    # ----------------------------------------------------------
+    # Se construye un objeto Tool con todos los metadatos extraídos
+    # y se registra en la instancia global del registro. A partir de
+    # este momento, la herramienta:
+    #   - Aparece en registry.get_schemas() (el modelo puede verla).
+    #   - Puede ser despachada por nombre con registry.dispatch().
     registry.register(Tool(
         name=name,
         description=description,
@@ -308,8 +465,12 @@ def tool(func: Callable) -> Callable:
         schema=schema,
     ))
 
-    # Paso 4: Devolver la función original sin modificar. El decorador no
-    # envuelve ni transforma la función: solo la registra como efecto
-    # secundario. Esto permite que la función pueda seguir usándose como
-    # una función Python normal en tests u otros contextos.
+    # ----------------------------------------------------------
+    # Paso 4: Devolver la función original sin modificar.
+    # ----------------------------------------------------------
+    # El decorador NO envuelve ni transforma la función: solo la registra
+    # como efecto secundario. Esto tiene dos ventajas:
+    #   1. La función puede seguir usándose como una función Python normal
+    #      en tests unitarios u otros contextos sin pasar por el registro.
+    #   2. No hay sobrecarga de rendimiento en llamadas directas.
     return func
